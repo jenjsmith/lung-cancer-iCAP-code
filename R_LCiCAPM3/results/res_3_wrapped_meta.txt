@@ -1,0 +1,5 @@
+chosen_index: 23
+chosen_seed: NA
+chosen_auc: 0.676111
+q75_auc: 0.676111
+timestamp: 2025-08-20 11:50:22 EDT

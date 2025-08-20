@@ -1,0 +1,4 @@
+Chosen seed: 7
+Chosen index: 7
+AUC: 0.706888888888889
+0.75 quantile: 0.706888888888889

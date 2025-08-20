@@ -1,0 +1,31 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# RStudio
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+
+# renv
+renv/library/
+renv/staging/
+renv/python/
+
+# Other temporary files
+*.Rout
+*.Rout.save
+*.Rout.fail
+*.Rcheck/
+*.log
+*.aux
+*.toc
+*.out
+*.knit.md
+*.utf8.md
+*.nb.html
+
+# If you want to ignore local environment configs
+.Rprofile

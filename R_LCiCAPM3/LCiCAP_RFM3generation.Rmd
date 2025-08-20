@@ -1,0 +1,313 @@
+---
+title: "Training and testing final model M3 in LC-iCAP manuscript"
+author: "Mark D'Ascenzo (revised by Jennifer Smith)"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_collapsed: false
+    toc_float: true
+    number_sections: true
+    toc_depth: 3
+    code_folding: hide
+    theme: united
+    
+---
+# Introduction
+
+This script was used to generate model M3 described in the clinical validation section of the manuscript, which was tested on the blind validation set and used for generating data in Data file 4E and Figure 7 of the manuscript. Features for the model  are a subset of the gene features in the deployment gene set and smoking status of the patient (current or former). **Note that smoking status is only used as an interaction term and not as a stand alone term in the model.** Features for M3 were selected by feature reduction to first select analytically stable genes followed by feature selection using GLM net. This script includes: 1) Model training by nested cross validation (with 25 seeds and 5 outer folds), 2) Selection of M3 based on performance and 3) generation of M3 predictions on the training set (OOB) and predictions on the blind test set. Analysis of performance on the blind test set (using the predictions and true class labels) was done outside of this script. Note that there is a duplicate sample in the blind validation set (two different serum samples from the same patient at the same blood draw were analyzed separately in the LC-iCAP). All performances of Models M3 and M4 were calculated with the to prediction probabilities of the duplicate sample averaged into one prediction. A similar script for Model M4 (LCiCAP_RFM4generation.Rmd) is in a separate project called R_LCiCAPMS1.
+```{css, echo=FALSE}
+body .main-container {
+  max-width: 1600px !important;
+  width: 1600px !important;
+}
+body {
+  max-width: 1600px !important;
+}
+```
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = T,
+	message = FALSE,
+	warning = FALSE,
+	cache = FALSE,
+	fig.width = 7,
+  fig.height = 5
+)
+```
+
+
+
+```{r}
+library(caret)
+library(dplyr)
+library(pROC)
+
+source('R/rf_nested_cv_mc.R')
+source('R/wrap_res3.R') # res3 was the original output of the script, but this wrapper code was added post-hoc to record reproducibility settings of Model M3
+```
+
+
+# Data
+```{r}
+
+ex_pos <- readRDS(file = 'data/for_modeling/LCII.035.056.hk3-batch_corrected-clean-pos-3.0.20231016.rds')
+
+stable_genes <- read.csv('data/stable_genes.csv')
+stable_genes <- stable_genes[stable_genes$p_vals > 0.004,]
+
+n_seeds <- 25
+ntree <- 500
+stability_sample_fraction <- 0.75
+stability_cutoff <- 0.9
+num_subsamples <- 50
+
+ver = "101623.1"
+
+overwrite = FALSE # this must be False to reproduce the M3 in the manuscript. if true, a new res_3.rds will be generated and there may be changes to Model M3. 
+```
+
+# Overview
+
+## QC-based gene filtering
+
+The NanoString deployment gene set was first filtered to retain only stable genes. The rationale for this filter is that QC analysis identified a mis-calibration between two code set lots in the NanoString PlexSet data resulting in a batch effect between training and blind test samples. The analysis to identify this analytical variation was done using technical replicates of DMOG chemical control samples run with both training and test set batches. To overcome the misc-alibration, gene filtering was done remove genes with the strongest batch effect retaining only 36 "stable genes". Stable genes are in "stable_genes.csv".  Stable genes are those not strongly affected by this batch effect. 
+
+## modeling parameters
+ * Model M3 used a feature selection approach to select a subset of the stable genes for modeling (using GLMNet). M4 used all stable genes as features.
+ * Model training and performance assessment was done using Random Forest (RF) and nested-cross-validation.
+ * Multiple seed were run (n=25) each with 5 outer folds, and the final model M3 used the seed corresponding to AUC-q75 (0.75 quantile)
+ 
+# Stable Genes
+```{r}
+stable_genes
+```
+
+
+# 25 Model seeds were generated using subsets of stable genes as features and M3 selected based on performance (AUC q75)
+```{r}
+#load data
+ex <- ex_pos[,ex_pos$project_group != 4] #remove blind validation set (which corresponds to project group 4)
+ex$status <- droplevels(ex$unblind)
+
+# filepath out
+fp <- 'results/res_3.rds'
+
+# RF modeing with nessted cross validation
+seed_list <- 1:n_seeds
+
+if ( !overwrite & file.exists(fp) ){
+  res_3 <- readRDS(fp)
+}else{
+  res_3 <- lapply(
+    1:n_seeds,
+    function(seed){
+      message(seed)
+      rf_nestedcv_stable(
+        ex[stable_genes$gene_name,], 
+        form = status~.*smoking_status, 
+        num_subsamples = num_subsamples, 
+        stability_sample_fraction = stability_sample_fraction, 
+        stability_cutoff = stability_cutoff, # M3 uses feature selection here. This differs from M4
+        seed = seed, 
+        ntree = 500,
+        preprocess_method = NULL
+      )
+    }
+  )
+  saveRDS(res_3, file = fp)
+}
+
+# Make a wrapped res3, which allows usage of the same model performance analysis pipeline used for M4 (within LCiCAP_RFM4generation.Rmd)
+res_3w <- wrap_res3(fp_in = "results/res_3.rds")
+
+# Extract chosen model (with AUC q75)
+model_3 <- res_3w$results[[res_3w$meta$chosen_index]]$final_model
+
+```
+
+### Histograms of AUCs and error rates across 25 seeds
+```{r message=TRUE}
+# Make histograms of error rates and AUC of ROC across all 25 seeds
+hist(
+  lapply(res_3w$results, function(x) x$final_model$err.rate |> mean()) |> unlist(),
+  main = "histogram of error rates across 25 seeds using all stable gene features"
+)
+abline(v=lapply(res_3w$results, function(x) x$final_model$err.rate |> mean()) |> unlist() |> mean())
+
+hist(
+  lapply(res_3w$results, function(x) x$auc) |> unlist(),
+  main = "Histogram of AUCs across 25 seeds using all stable genes as features"
+)
+#abline(v=res_3w$results[[which.min(abs(aucs - q75))]]$auc)
+
+```
+
+M3 was selected for validation as the model with AUC at 75th percentile value
+
+### Variable importance scores for selected model M3 
+
+```{r message=TRUE}
+varImp(model_3)
+```
+
+## Generation of Predictions
+
+Model M3 was used to generate prediction against the blind test set
+
+```{r}
+
+fp2 <- 'results/res_3_wrapped.rds'
+make_predictions <- function(fp2, ex, name, ver = 231016) {
+  # Load wrapped results
+  res <- readRDS(fp2)
+  if (is.null(res$results) || is.null(res$meta$chosen_index)) {
+    stop("Expected new format: list(results=..., meta=list(chosen_index=..., chosen_seed=...)).")
+  }
+
+  runs <- res$results
+  idx  <- res$meta$chosen_index
+  if (idx < 1 || idx > length(runs)) stop("meta$chosen_index out of bounds.")
+  model <- runs[[idx]]$final_model
+
+  # External validation subset
+  ex_ev <- ex[, ex$partition_new == "external_validation"]
+
+  # Build EV design matrix to match training formula (~ . * smoking_status)
+  ev <- data.frame(t(SummarizedExperiment::assay(ex_ev, "log2_normalized_counts")))
+  ev$smoking_status <- SummarizedExperiment::colData(ex_ev)$smoking_status
+  mm <- stats::model.matrix(~ . * smoking_status, ev)
+  colnames(mm) <- gsub(":", ".", colnames(mm), fixed = TRUE)
+
+  # Get predictor names
+  xvars <- model$forest$xvar.names
+  if (is.null(xvars) || !length(xvars)) {
+    xvars <- rownames(randomForest::importance(model))
+  }
+
+  # If none match, try using gene symbols from rowData(ex_ev)
+  if (sum(xvars %in% colnames(mm)) == 0 &&
+      "gene_name" %in% colnames(SummarizedExperiment::rowData(ex_ev))) {
+    m <- SummarizedExperiment::assay(ex_ev, "log2_normalized_counts")
+    rn <- as.character(SummarizedExperiment::rowData(ex_ev)$gene_name)
+    ok <- !is.na(rn) & nzchar(rn)
+    m <- m[ok, , drop = FALSE]
+    rownames(m) <- rn[ok]
+
+    ev <- data.frame(t(m))
+    ev$smoking_status <- ex_ev$smoking_status
+    mm <- stats::model.matrix(~ . * smoking_status, ev)
+    colnames(mm) <- gsub(":", ".", colnames(mm), fixed = TRUE)
+  }
+
+  # Align: add zero cols for missing, reorder to match model
+  present <- intersect(colnames(mm), xvars)
+  missing <- setdiff(xvars, present)
+  if (length(missing)) {
+    message("Adding zero columns for missing predictors: ",
+            paste(head(missing, 10), collapse = ", "),
+            if (length(missing) > 10) " ..." else "")
+    add <- matrix(0, nrow(mm), length(missing), dimnames = list(NULL, missing))
+    mm <- cbind(mm[, present, drop = FALSE], add)
+  } else {
+    mm <- mm[, present, drop = FALSE]
+  }
+  mm <- mm[, xvars, drop = FALSE]
+
+  # Predict probabilities and label
+  prob <- predict(model, as.data.frame(mm), type = "prob")
+  preds <- tibble::as_tibble(prob, rownames = "precyte_uid") |>
+    dplyr::select(-benign) |>
+    dplyr::mutate(pred = dplyr::if_else(malignant > 0.5, "malignant", "benign")) |>
+    dplyr::left_join(
+      tibble::as_tibble(SummarizedExperiment::colData(ex_ev)) |>
+        dplyr::select(precyte_uid, barcode),
+      by = "precyte_uid"
+    ) |>
+    dplyr::relocate(barcode, .after = "precyte_uid")
+
+  # Outputs
+  out_dir <- "results/preds"
+  if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
+  readr::write_csv(preds, file.path(out_dir, sprintf("%s_%s_blind_validation_predictions.csv", ver, name)))
+
+  feat <- randomForest::importance(model) |>
+    tibble::as_tibble(rownames = "feature") |>
+    dplyr::arrange(dplyr::desc(MeanDecreaseGini))
+  readr::write_csv(feat, file.path(out_dir, sprintf("%s_%s_rf_features.csv", ver, name)))
+
+  # Return a small summary invisibly
+  invisible(list(
+    preds = preds,
+    features = feat,
+    chosen_index = idx,
+    chosen_seed = res$meta$chosen_seed
+  ))
+}
+
+
+```
+
+
+```{r}
+make_predictions('results/res_3_wrapped.rds', ex_pos, 'model_3')
+```
+
+## Histogram of prediction probabilities for blind test set
+
+histogram of 80 samples in the bind test set sorted by M3 prediction probabilities (note that these data contain a duplicate sample that was processed twice)
+In this analysis, the classes of the blind test set are blinded. Performance of M3 on the blind test set was done outside of this script using unblinded data.
+
+```{r}
+
+hist(
+  read_csv("results/preds/231016_model_3_blind_validation_predictions.csv")$malignant,
+  main="Model 3: Prediction Probabilities",
+  xlab="Prob Malignant"
+
+)
+
+```
+### prediction probabilities for samples in the training set (OOB predictions)
+```{r}
+assertthat::assert_that(all(ex[,rownames(model_3$votes)]$partition_new == "train"))
+assertthat::assert_that(all(ex[,ex$partition_new == 'train']$precyte_uid %in% rownames(model_3$votes)))
+
+preds_train = data.frame(malignant=model_3$votes[,2])
+
+write.csv(file='results/preds_train/model_3.csv', preds_train, col.names = F, quote=F)
+```
+# ROC curve showing Out of bag predictions of M3 on the training set of 96 samples
+
+```{r}
+
+# Merge predicted probabilities with true labels
+true_labels <- colData(ex)[rownames(model_3$votes), "status"]
+df_roc <- data.frame(
+  actual = factor(true_labels, levels = c("benign", "malignant")),
+  malignant = model_3$votes[, "malignant"]
+)
+
+# Compute ROC and AUC
+roc_obj <- roc(df_roc$actual, df_roc$malignant, levels = c("benign", "malignant"), direction = "<")
+auc_val <- auc(roc_obj)
+auc_ci <- ci.auc(roc_obj)
+
+# draw to the HTML output
+plot(roc_obj, col = "#1f78b4", lwd = 2, main = "ROC Curve – Training Set (Model M3)")
+legend("bottomright",
+       legend = sprintf("AUC = %.2f (95%% CI: %.2f–%.2f)", auc_val, auc_ci[1], auc_ci[3]),
+       bty = "n", text.col = "#1f78b4")
+abline(a = 0, b = 1, lty = 2, col = "gray")
+
+# copy the current plot to a PDF
+grDevices::dev.copy2pdf(file = "results/preds_train/ROC_Model3_Train.pdf", width = 6, height = 6)
+grDevices::dev.off()
+
+sessionInfo()
+
+
+```
+
